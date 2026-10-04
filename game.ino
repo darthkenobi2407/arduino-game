@@ -1,42 +1,44 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <EEPROM.h>
 
-// ============================================================
-// OLED
-// ============================================================
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// ============================================================
-// BUTTONS
-// ============================================================
-
 #define BTN_UP     2
 #define BTN_DOWN   3
 #define BTN_LEFT   4
 #define BTN_RIGHT  5
 
-// ============================================================
-// GAME STATES
-// ============================================================
 
 enum GameState {
   MENU,
   FLAPPY,
-  CROSSY
+  CROSSY,
+  PAUSED
 };
 
 GameState gameState = MENU;
+GameState pausedGameState = MENU;
 
 int menuSelection = 0;
+int pauseSelection = 0;
 
-// ============================================================
-// BUTTON HELPERS
-// ============================================================
+const unsigned long PAUSE_HOLD_MS = 700;
+bool pauseButtonWasDown = false;
+bool pauseButtonTriggered = false;
+unsigned long pauseButtonDownAt = 0;
+
+const int FLAPPY_HIGH_SCORE_EEPROM_ADDR = 0;
+const int CROSSY_HIGH_SCORE_EEPROM_ADDR = 2;
+
+int flappyHighScore = 0;
+int crossyHighScore = 0;
+
 
 bool pressed(int pin) {
   return digitalRead(pin) == LOW;
@@ -57,9 +59,53 @@ bool buttonPressed(int pin) {
   return result;
 }
 
-// ============================================================
-// FLAPPY BIRD VARIABLES
-// ============================================================
+int rightButtonAction() {
+  bool buttonDown = pressed(BTN_RIGHT);
+
+  if (buttonDown) {
+    if (!pauseButtonWasDown) {
+      pauseButtonWasDown = true;
+      pauseButtonTriggered = false;
+      pauseButtonDownAt = millis();
+    }
+
+    if (!pauseButtonTriggered &&
+        millis() - pauseButtonDownAt >= PAUSE_HOLD_MS) {
+      pauseButtonTriggered = true;
+      return 2;
+    }
+
+    return 0;
+  }
+
+  if (pauseButtonWasDown) {
+    pauseButtonWasDown = false;
+
+    if (!pauseButtonTriggered)
+      return 1;
+  }
+
+  return 0;
+}
+
+int readHighScore(int address) {
+  int score = (int)((uint8_t)EEPROM.read(address) |
+    ((uint8_t)EEPROM.read(address + 1) << 8));
+
+  if (score == 65535)
+    return 0;
+
+  return score;
+}
+
+void saveHighScore(int address, int score) {
+  if (score < 0)
+    score = 0;
+
+  EEPROM.update(address, (byte)(score & 0xFF));
+  EEPROM.update(address + 1, (byte)((score >> 8) & 0xFF));
+}
+
 
 float birdY;
 float birdVelocity;
@@ -76,9 +122,6 @@ const int pipeGap = 23;
 int flappyScore;
 bool flappyGameOver;
 
-// ============================================================
-// CROSSY ROAD VARIABLES
-// ============================================================
 
 int playerX;
 int playerY;
@@ -90,7 +133,6 @@ int crossyScore;
 
 bool crossyGameOver;
 
-// Cars
 struct Car {
   int x;
   int y;
@@ -100,9 +142,6 @@ struct Car {
 
 Car cars[8];
 
-// ============================================================
-// SETUP
-// ============================================================
 
 void setup() {
 
@@ -119,6 +158,9 @@ void setup() {
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+
+  flappyHighScore = readHighScore(FLAPPY_HIGH_SCORE_EEPROM_ADDR);
+  crossyHighScore = readHighScore(CROSSY_HIGH_SCORE_EEPROM_ADDR);
 
   showSplash();
 
@@ -141,6 +183,10 @@ void loop() {
 
   else if (gameState == CROSSY) {
     crossyLoop();
+  }
+
+  else if (gameState == PAUSED) {
+    pauseMenuLoop();
   }
 }
 
@@ -255,6 +301,59 @@ void drawMenu() {
 }
 
 // ============================================================
+// PAUSE MENU
+// ============================================================
+
+void pauseMenuLoop() {
+
+  if (buttonPressed(BTN_UP) || buttonPressed(BTN_DOWN)) {
+    pauseSelection = 1 - pauseSelection;
+  }
+
+  if (buttonPressed(BTN_LEFT)) {
+    if (pauseSelection == 0)
+      gameState = pausedGameState;
+    else
+      gameState = MENU;
+
+    return;
+  }
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(34, 2);
+  display.println("PAUSED");
+
+  display.setTextSize(1);
+  if (pauseSelection == 0) {
+    display.fillRect(8, 27, 112, 14, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setCursor(39, 31);
+    display.println("RESUME");
+    display.setTextColor(SSD1306_WHITE);
+  } else {
+    display.drawRect(8, 27, 112, 14, SSD1306_WHITE);
+    display.setCursor(39, 31);
+    display.println("RESUME");
+  }
+
+  if (pauseSelection == 1) {
+    display.fillRect(8, 45, 112, 14, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setCursor(27, 49);
+    display.println("MAIN MENU");
+    display.setTextColor(SSD1306_WHITE);
+  } else {
+    display.drawRect(8, 45, 112, 14, SSD1306_WHITE);
+    display.setCursor(27, 49);
+    display.println("MAIN MENU");
+  }
+
+  display.display();
+  delay(30);
+}
+
+// ============================================================
 // FLAPPY START
 // ============================================================
 
@@ -282,9 +381,18 @@ void flappyLoop() {
 
   if (flappyGameOver) {
 
+    if (flappyScore > flappyHighScore) {
+      flappyHighScore = flappyScore;
+      saveHighScore(FLAPPY_HIGH_SCORE_EEPROM_ADDR, flappyHighScore);
+    }
+
     drawFlappy();
 
     display.setTextSize(1);
+    display.setCursor(18, 18);
+    display.print("HI:");
+    display.print(flappyHighScore);
+
     display.setCursor(25, 28);
     display.println("GAME OVER");
 
@@ -306,6 +414,14 @@ void flappyLoop() {
 
     delay(80);
 
+    return;
+  }
+
+  int rightAction = rightButtonAction();
+  if (rightAction == 2) {
+    pausedGameState = FLAPPY;
+    pauseSelection = 0;
+    gameState = PAUSED;
     return;
   }
 
@@ -369,6 +485,10 @@ void drawFlappy() {
   display.setCursor(2, 2);
   display.print("S:");
   display.print(flappyScore);
+
+  display.setCursor(82, 2);
+  display.print("HI:");
+  display.print(flappyHighScore);
 
   // Bird
   display.fillRect(
@@ -444,9 +564,18 @@ void crossyLoop() {
 
   if (crossyGameOver) {
 
+    if (crossyScore > crossyHighScore) {
+      crossyHighScore = crossyScore;
+      saveHighScore(CROSSY_HIGH_SCORE_EEPROM_ADDR, crossyHighScore);
+    }
+
     drawCrossy();
 
     display.setTextSize(1);
+
+    display.setCursor(18, 18);
+    display.print("HI:");
+    display.print(crossyHighScore);
 
     display.setCursor(25, 27);
     display.println("GAME OVER");
@@ -472,9 +601,13 @@ void crossyLoop() {
     return;
   }
 
-  // ==========================================================
-  // PLAYER MOVEMENT
-  // ==========================================================
+  int rightAction = rightButtonAction();
+  if (rightAction == 2) {
+    pausedGameState = CROSSY;
+    pauseSelection = 0;
+    gameState = PAUSED;
+    return;
+  }
 
   if (buttonPressed(BTN_UP)) {
 
@@ -502,7 +635,7 @@ void crossyLoop() {
       playerX = 0;
   }
 
-  if (buttonPressed(BTN_RIGHT)) {
+  if (rightAction == 1) {
 
     playerX += 6;
 
@@ -510,15 +643,12 @@ void crossyLoop() {
       playerX = 123;
   }
 
-  // ==========================================================
-  // MOVE CARS
-  // ==========================================================
 
   for (int i = 0; i < 8; i++) {
 
     cars[i].x += cars[i].speed;
 
-    // Wrap around
+
     if (cars[i].speed > 0 &&
         cars[i].x > 128) {
 
@@ -531,7 +661,7 @@ void crossyLoop() {
       cars[i].x = 128;
     }
 
-    // Collision
+
     if (playerX + playerSize > cars[i].x &&
         playerX < cars[i].x + cars[i].width &&
         playerY + playerSize > cars[i].y &&
@@ -541,14 +671,14 @@ void crossyLoop() {
     }
   }
 
-  // Reached top
+
   if (playerY <= 5) {
 
     crossyScore++;
 
     playerY = 57;
 
-    // Increase difficulty
+
     for (int i = 0; i < 8; i++) {
 
       if (cars[i].speed > 0)
@@ -564,21 +694,22 @@ void crossyLoop() {
   delay(40);
 }
 
-// ============================================================
-// DRAW CROSSY ROAD
-// ============================================================
 
 void drawCrossy() {
 
   display.clearDisplay();
 
-  // Score
+
   display.setTextSize(1);
   display.setCursor(2, 2);
   display.print("S:");
   display.print(crossyScore);
 
-  // Grass
+  display.setCursor(82, 2);
+  display.print("HI:");
+  display.print(crossyHighScore);
+
+
   display.fillRect(
     0,
     0,
@@ -595,7 +726,7 @@ void drawCrossy() {
     SSD1306_WHITE
   );
 
-  // Road
+
   display.fillRect(
     0,
     10,
@@ -604,7 +735,7 @@ void drawCrossy() {
     SSD1306_BLACK
   );
 
-  // Road lane markings
+
   for (int y = 15; y < 54; y += 10) {
 
     for (int x = 0; x < 128; x += 16) {
@@ -619,7 +750,7 @@ void drawCrossy() {
     }
   }
 
-  // Cars
+
   for (int i = 0; i < 8; i++) {
 
     display.fillRect(
@@ -630,7 +761,7 @@ void drawCrossy() {
       SSD1306_WHITE
     );
 
-    // Wheels
+
     display.drawPixel(
       cars[i].x + 2,
       cars[i].y + 5,
@@ -644,7 +775,7 @@ void drawCrossy() {
     );
   }
 
-  // Player
+
   display.fillRect(
     playerX,
     playerY,
@@ -653,7 +784,7 @@ void drawCrossy() {
     SSD1306_WHITE
   );
 
-  // Player eyes
+
   display.drawPixel(
     playerX + 1,
     playerY + 1,
